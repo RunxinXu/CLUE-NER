@@ -17,7 +17,7 @@ KIND2ID = dict()
 for i in range(len(KIND)):
     KIND2ID[KIND[i]] = i
 TARGET_PAD = 31 # i.e., if the label is 31, we can ignore it and do not need to calculate the according loss
-
+CONTEXT_PAD = 0
 
 class MyTokenizer(BertTokenizer):
     def __init__(self, vocab_file, do_lower_case=True, **kwargs):
@@ -89,9 +89,8 @@ def collate_fn(batch):
     lengths = torch.LongTensor([sample['length'] for sample in batch])
     tokens = [torch.LongTensor(sample['tokens']) for sample in batch]
     labels = [torch.LongTensor(sample['labels']) for sample in batch]
-    pad = 0
 
-    tokens = nn.utils.rnn.pad_sequence(tokens, batch_first=True, padding_value=pad)
+    tokens = nn.utils.rnn.pad_sequence(tokens, batch_first=True, padding_value=CONTEXT_PAD)
     labels = nn.utils.rnn.pad_sequence(labels, batch_first=True, padding_value=TARGET_PAD)
 
     data = {
@@ -101,15 +100,43 @@ def collate_fn(batch):
     }
     return data
 
-def MyNERModel(nn.module):
-    def __init__(self, config):
-        self.bert = BertModel.from_pretrained("hfl/chinese-roberta-wwm-ext-large") # BertModel
+class MyNERModel(nn.Module):
+    def __init__(self, model_name='hfl/chinese-roberta-wwm-ext-large'):
+        super().__init__()
+        self.bert = BertModel.from_pretrained(model_name) # BertModel
+        self.total_kinds = 31
+        self.predict = nn.Sequential(
+            nn.Dropout(p=0.3),
+            nn.Linear(1024, 128),
+            nn.ReLU(),
+            nn.Linear(128, self.total_kinds),
+        )
+        self.logsoftmax = nn.LogSoftmax(dim=-1)
+        self.loss = nn.NLLLoss(ignore_index=TARGET_PAD)
+
+    def forward(self, tokens, labels=None):
+        # tokens: bsz * length
+        mask = tokens != CONTEXT_PAD
+        output = self.bert(input_ids=tokens, attention_mask=mask)
+        output = output[0] # bsz * length * dim
+        logits = self.predict(output)
+        prediction = self.logsoftmax(logits)
+        
+        if labels is None:
+            return prediction
+
+        prediction = prediction[:, 1:-1, :] # skip [cls] and [sep]
+        labels = labels[:, 1:-1] 
+        loss = self.loss(prediction.reshape(-1, self.total_kinds), labels.reshape(-1))
+        return prediction, loss
 
 if __name__ == '__main__':
     tokenizer = MyTokenizer.from_pretrained("hfl/chinese-roberta-wwm-ext-large") # MyTokenizer
     dataset = NERDataset('data/train.json', tokenizer)
     data_loader = DataLoader(dataset, batch_size=3, shuffle=False, collate_fn=collate_fn)
-    for d in data_loader:
-        print(d)
+    model = MyNERModel().cuda()
+    for batch in data_loader:
+        prediction, loss = model(tokens=batch['tokens'].cuda(), labels=batch['labels'].cuda())
+        print(loss)
         input()
 
