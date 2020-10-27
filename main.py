@@ -3,7 +3,12 @@ import torch
 import torch.nn as nn
 from torch.utils.data import Dataset
 from torch.utils.data import DataLoader
+from torch.optim import Adam
 import json
+import argparse
+import os
+from tqdm import tqdm
+from tensorboardX import SummaryWriter
 
 # 简单检查了数据
 # 一共有十个类 而且不存在overlap or nested的现象
@@ -101,9 +106,9 @@ def collate_fn(batch):
     return data
 
 class MyNERModel(nn.Module):
-    def __init__(self, model_name='hfl/chinese-roberta-wwm-ext-large'):
+    def __init__(self, args):
         super().__init__()
-        self.bert = BertModel.from_pretrained(model_name) # BertModel
+        self.bert = BertModel.from_pretrained(args.model_name) # BertModel
         self.total_kinds = 31
         self.predict = nn.Sequential(
             nn.Dropout(p=0.3),
@@ -130,13 +135,60 @@ class MyNERModel(nn.Module):
         loss = self.loss(prediction.reshape(-1, self.total_kinds), labels.reshape(-1))
         return prediction, loss
 
+def train(model, train_dataloader, eval_dataloader, args, writer):
+    optimizer = Adam(model.parameters(), lr=args.learning_rate)
+    global_step = 0
+    best_f1 = 0
+    for epoch in range(args.epochs):
+        for batch in tqdm(train_dataloader):
+            prediction, loss = model(tokens=batch['tokens'].cuda(), labels=batch['labels'].cuda())
+
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+
+            writer.add_scalar('Train/Loss', loss.item(), global_step)
+            global_step += 1
+        
+        # eval
+        # f1 = validate(model, eval_dataloader, args)
+        f1 = 1.0
+        writer.add_scalar('Eval/F1', f1, epoch)
+
+        if f1 > best_f1:
+            best_f1 = f1
+            torch.save(model.state_dict(), os.path.join(args.output_dir, 'best_model.bin'))
+
+
+def get_argparse():
+    parser = argparse.ArgumentParser()
+
+    parser.add_argument("--model_name", default='hfl/chinese-roberta-wwm-ext-large', type=str,
+                        help="Model name")
+    parser.add_argument("--data_dir", default='data', type=str,
+                        help="Data folder", )
+    parser.add_argument("--batch_size", default=32, type=int,
+                        help="Batch size" )
+    parser.add_argument("--learning_rate", default=1e-3, type=float,
+                        help="Batch size" )
+    parser.add_argument("--epochs", default=50, type=int,
+                        help="Output folder", )
+    parser.add_argument("--output_dir", default=None, type=str, required=True,
+                        help="Output folder", )
+    parser.add_argument("--load_model", default=None, type=str,
+                        help="Load model", )
+    return parser
+
 if __name__ == '__main__':
-    tokenizer = MyTokenizer.from_pretrained("hfl/chinese-roberta-wwm-ext-large") # MyTokenizer
-    dataset = NERDataset('data/train.json', tokenizer)
-    data_loader = DataLoader(dataset, batch_size=3, shuffle=False, collate_fn=collate_fn)
-    model = MyNERModel().cuda()
-    for batch in data_loader:
-        prediction, loss = model(tokens=batch['tokens'].cuda(), labels=batch['labels'].cuda())
-        print(loss)
-        input()
+    args = get_argparse().parse_args()
+    tokenizer = MyTokenizer.from_pretrained(args.model_name)
+    train_dataset = NERDataset(os.path.join(args.data_dir, 'train.json'), tokenizer)
+    train_dataloader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, collate_fn=collate_fn)
+    eval_dataset = NERDataset(os.path.join(args.data_dir, 'test.json'), tokenizer)
+    eval_dataloader = DataLoader(eval_dataset, batch_size=args.batch_size, shuffle=False, collate_fn=collate_fn)
+    model = MyNERModel(args).cuda()
+    if args.load_model is not None:
+        model.load_state_dict(torch.load(args.load_model))
+    writer = SummaryWriter(args.output_dir)
+    train(model, train_dataloader, eval_dataloader, args, writer)
 
