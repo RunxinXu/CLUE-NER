@@ -7,6 +7,7 @@ from torch.optim import Adam
 import json
 import argparse
 import os
+from collections import defaultdict
 from tqdm import tqdm
 from tensorboardX import SummaryWriter
 
@@ -19,8 +20,10 @@ from tensorboardX import SummaryWriter
 # TARGET_PAD => 31
 KIND = ['name', 'book', 'organization', 'company', 'game', 'address', 'scene', 'government', 'position', 'movie'] #len=10
 KIND2ID = dict()
+ID2KIND = dict()
 for i in range(len(KIND)):
     KIND2ID[KIND[i]] = i
+    ID2KIND[i] = KIND[i]
 TARGET_PAD = 31 # i.e., if the label is 31, we can ignore it and do not need to calculate the according loss
 CONTEXT_PAD = 0
 
@@ -40,7 +43,7 @@ class MyTokenizer(BertTokenizer):
         return _tokens
 
 class NERDataset(Dataset):
-    def __init__(self, data_path, tokenizer): 
+    def __init__(self, data_path, tokenizer, train=True): 
         self.data = []
         self.B = 0
         self.I = 10
@@ -51,6 +54,7 @@ class NERDataset(Dataset):
                 d = json.loads(line)
                 text = d['text']
                 tokens = tokenizer.tokenize(text) # list
+                raw_token = tokens
                 tokens = tokenizer.convert_tokens_to_ids(tokens) # list
                 labels = [30] * len(tokens) # 30 means O, i.e., not an entity
                 
@@ -79,7 +83,9 @@ class NERDataset(Dataset):
                 self.data.append({
                     'tokens': tokens,
                     'labels': labels,
-                    'length': tokens.size(0)
+                    'length': tokens.size(0),
+                    'raw_label': label if not train else None,
+                    'raw_token': raw_token if not train else None
                 })
 
     def __len__(self):
@@ -103,6 +109,11 @@ def collate_fn(batch):
         'labels': labels,
         'lengths': lengths
     }
+
+    if batch[0]['raw_label'] is not None:
+        data['raw_label'] = [sample['raw_label'] for sample in batch]
+        data['raw_token'] = [sample['raw_token'] for sample in batch]
+    
     return data
 
 class MyNERModel(nn.Module):
@@ -151,14 +162,102 @@ def train(model, train_dataloader, eval_dataloader, args, writer):
             global_step += 1
         
         # eval
-        # f1 = validate(model, eval_dataloader, args)
-        f1 = 1.0
+        model.eval()
+        f1 = validate(model, eval_dataloader, args)
         writer.add_scalar('Eval/F1', f1, epoch)
+        model.train()
 
         if f1 > best_f1:
             best_f1 = f1
             torch.save(model.state_dict(), os.path.join(args.output_dir, 'best_model.bin'))
 
+def validate(model, eval_dataloader, args):
+    pred = []
+    gold = []
+    with torch.no_grad():
+        for batch in tqdm(eval_dataloader):
+            prediction = model(tokens=batch['tokens'].cuda(), labels=None)
+            prediction = prediction[:, 1:-1, :]
+            prediction = torch.argmax(prediction, dim=-1).cpu().numpy() # bsz * length
+            bsz, length = prediction.shape
+            for i in range(bsz):
+                cur_result = {}
+                for entity_type in KIND:
+                    cur_result[entity_type] = {}
+                raw_token = batch['raw_token'][i]
+                gold.append(batch['raw_label'][i])
+
+                j = 0
+                while j < len(raw_token):
+                    if prediction[i][j] >= 20 and prediction[i][j] < 30: # S
+                        entity_name = raw_token[j]
+                        entity_type = ID2KIND[prediction[i][j]-20]
+                        if entity_name not in cur_result[entity_type]:
+                            cur_result[entity_type][entity_name] = []
+                        cur_result[entity_type][entity_name].append([j, j])
+                        j += 1
+                    elif prediction[i][j] < 10: # B
+                        entity_type = ID2KIND[prediction[i][j]]
+                        shouldbe = KIND2ID[entity_type] + 10 # should be I-same kind
+                        new_j = j + 1
+                        while new_j < len(raw_token) and prediction[i][new_j] == shouldbe:
+                            new_j += 1
+                        if new_j > j + 1:
+                            entity_name = ''.join(raw_token[j:new_j])
+                            if entity_name not in cur_result[entity_type]:
+                                cur_result[entity_type][entity_name] = []
+                            cur_result[entity_type][entity_name].append([j, new_j-1])
+                            j = new_j
+                        else:
+                            # not valid
+                            j = new_j
+                    else: # I or O
+                        j += 1
+
+                pred.append(cur_result)
+
+    _, macro_f1 = get_f1_score(pred, gold)
+    return macro_f1
+
+def get_f1_score_label(pred, gold, label="organization"):
+    """
+    打分函数
+    """
+    TP = 0
+    FP = 0
+    FN = 0
+    for p, g in zip(pred, gold):
+
+        p = p.get(label, {}).keys()
+        g = g.get(label, {}).keys()
+        for i in p:
+            if i in g:
+                TP += 1
+            else:
+                FP += 1
+        for i in g:
+            if i not in p:
+                FN += 1
+
+    p = TP / (TP + FP + 1e-20)
+    r = TP / (TP + FN + 1e-20)
+    f = 2 * p * r / (p + r + 1e-20)
+    print('label: {}\nTP: {}\tFP: {}\tFN: {}'.format(label, TP, FP, FN))
+    print('P: {:.2f}\tR: {:.2f}\tF1: {:.2f}'.format(p, r, f))
+    print()
+    return f
+
+
+def get_f1_score(pred, gold):
+    f_score = {}
+    labels = ['address', 'book', 'company', 'game', 'government', 'movie', 'name', 'organization', 'position', 'scene']
+    sum = 0
+    for label in labels:
+        f = get_f1_score_label(pred, gold, label=label)
+        f_score[label] = f
+        sum += f
+    avg = sum / (len(labels) + 1e-20)
+    return f_score, avg
 
 def get_argparse():
     parser = argparse.ArgumentParser()
@@ -169,7 +268,7 @@ def get_argparse():
                         help="Data folder", )
     parser.add_argument("--batch_size", default=32, type=int,
                         help="Batch size" )
-    parser.add_argument("--learning_rate", default=1e-3, type=float,
+    parser.add_argument("--learning_rate", default=1e-5, type=float,
                         help="Batch size" )
     parser.add_argument("--epochs", default=50, type=int,
                         help="Output folder", )
@@ -184,7 +283,7 @@ if __name__ == '__main__':
     tokenizer = MyTokenizer.from_pretrained(args.model_name)
     train_dataset = NERDataset(os.path.join(args.data_dir, 'train.json'), tokenizer)
     train_dataloader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, collate_fn=collate_fn)
-    eval_dataset = NERDataset(os.path.join(args.data_dir, 'test.json'), tokenizer)
+    eval_dataset = NERDataset(os.path.join(args.data_dir, 'test.json'), tokenizer, train=False)
     eval_dataloader = DataLoader(eval_dataset, batch_size=args.batch_size, shuffle=False, collate_fn=collate_fn)
     model = MyNERModel(args).cuda()
     if args.load_model is not None:
