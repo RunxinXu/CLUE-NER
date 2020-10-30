@@ -10,6 +10,7 @@ import os
 from collections import defaultdict
 from tqdm import tqdm
 from tensorboardX import SummaryWriter
+from sklearn.model_selection import KFold
 
 # 简单检查了数据
 # 一共有十个类 而且不存在overlap or nested的现象
@@ -84,8 +85,8 @@ class NERDataset(Dataset):
                     'tokens': tokens,
                     'labels': labels,
                     'length': tokens.size(0),
-                    'raw_label': label if not train else None,
-                    'raw_token': raw_token if not train else None
+                    'raw_label': label,
+                    'raw_token': raw_token
                 })
 
     def __len__(self):
@@ -146,36 +147,53 @@ class MyNERModel(nn.Module):
         loss = self.loss(prediction.reshape(-1, self.total_kinds), labels.reshape(-1))
         return prediction, loss
 
-def train(model, train_dataloader, eval_dataloader, args, writer):
-    optimizer = Adam(model.parameters(), lr=args.learning_rate)
-    global_step = 0
-    best_f1 = 0
-    for epoch in range(args.epochs):
-        for batch in tqdm(train_dataloader):
-            prediction, loss = model(tokens=batch['tokens'].cuda(), labels=batch['labels'].cuda())
+def train(train_dataset, args, writer):
+    kf = KFold(n_splits=args.n_splits, shuffle=True, random_state=0)
+    global_best_f1 = 0
+    for fold_cnt, (train_idx, val_idx) in enumerate(kf.split(train_dataset)):
+        train_data = [train_dataset[i] for i in train_idx]
+        val_data = [train_dataset[i] for i in val_idx]
+        train_dataloader = DataLoader(train_data, batch_size=args.batch_size, shuffle=True, collate_fn=collate_fn)
+        val_dataloader = DataLoader(val_data, batch_size=args.batch_size, shuffle=True, collate_fn=collate_fn)
 
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
+        model = MyNERModel(args).cuda()
+        optimizer = Adam(model.parameters(), lr=args.learning_rate)
+        global_step = 0
+        fold_best_f1 = 0
 
-            writer.add_scalar('Train/Loss', loss.item(), global_step)
-            global_step += 1
-        
-        # eval
-        model.eval()
-        f1 = validate(model, eval_dataloader, args)
-        writer.add_scalar('Eval/F1', f1, epoch)
-        model.train()
+        print('****************Fold %d*****************' % fold_cnt)
+        for epoch in range(args.epochs):
+            print('Epoch %d' % epoch)
+            for batch in tqdm(train_dataloader):
+                prediction, loss = model(tokens=batch['tokens'].cuda(), labels=batch['labels'].cuda())
 
-        if f1 > best_f1:
-            best_f1 = f1
-            torch.save(model.state_dict(), os.path.join(args.output_dir, 'best_model.bin'))
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
 
-def validate(model, eval_dataloader, args):
+                writer.add_scalar('Fold_'+str(fold_cnt)+'_Train/Loss', loss.item(), global_step)
+                global_step += 1
+            
+            # eval
+            model.eval()
+            f1 = validate(model, val_dataloader, args)
+            writer.add_scalar('Val/F1', f1, epoch)
+            model.train()
+
+            if f1 > fold_best_f1:
+                fold_best_f1 = f1
+                torch.save(model.state_dict(), os.path.join(args.output_dir, 'fold_'+str(fold_cnt)+'_best_model.bin'))
+                if f1 > global_best_f1:
+                    global_best_f1 = f1
+                    torch.save(model.state_dict(), os.path.join(args.output_dir, 'global_best_model.bin'))
+                    print('-----------Global Best: Fold %d, F1-Score: %.4f-----------' % (fold_cnt, f1))
+
+
+def validate(model, val_dataloader, args):
     pred = []
     gold = []
     with torch.no_grad():
-        for batch in tqdm(eval_dataloader):
+        for batch in tqdm(val_dataloader):
             prediction = model(tokens=batch['tokens'].cuda(), labels=None)
             prediction = prediction[:, 1:-1, :]
             prediction = torch.argmax(prediction, dim=-1).cpu().numpy() # bsz * length
@@ -218,6 +236,16 @@ def validate(model, eval_dataloader, args):
 
     _, macro_f1 = get_f1_score(pred, gold)
     return macro_f1
+
+
+def test(test_dataloader, args, writer):
+    model = MyNERModel(args).cuda()
+    model_param = torch.load(os.path.join(args.output_dir, 'global_best_model.bin'))
+    model.load_state_dict(model_param)
+    model.eval()
+    f1 = validate(model, test_dataloader, args)
+    print('-----------Test set, F1-Score: %.4f-----------' % f1)
+
 
 def get_f1_score_label(pred, gold, label="organization"):
     """
@@ -276,18 +304,21 @@ def get_argparse():
                         help="Output folder", )
     parser.add_argument("--load_model", default=None, type=str,
                         help="Load model", )
+    parser.add_argument("--n_splits", default=5, type=int,
+                        help="n_splits", )
     return parser
 
 if __name__ == '__main__':
     args = get_argparse().parse_args()
     tokenizer = MyTokenizer.from_pretrained(args.model_name)
     train_dataset = NERDataset(os.path.join(args.data_dir, 'train.json'), tokenizer)
-    train_dataloader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, collate_fn=collate_fn)
-    eval_dataset = NERDataset(os.path.join(args.data_dir, 'test.json'), tokenizer, train=False)
-    eval_dataloader = DataLoader(eval_dataset, batch_size=args.batch_size, shuffle=False, collate_fn=collate_fn)
-    model = MyNERModel(args).cuda()
-    if args.load_model is not None:
-        model.load_state_dict(torch.load(args.load_model))
+    #train_dataloader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, collate_fn=collate_fn)
+    test_dataset = NERDataset(os.path.join(args.data_dir, 'test.json'), tokenizer, train=False)
+    test_dataloader = DataLoader(test_dataset, batch_size=args.batch_size, shuffle=False, collate_fn=collate_fn)
+    #model = MyNERModel(args).cuda()
+    #if args.load_model is not None:
+    #    model.load_state_dict(torch.load(args.load_model))
     writer = SummaryWriter(args.output_dir)
-    train(model, train_dataloader, eval_dataloader, args, writer)
+    train(train_dataset, args, writer)
+    test(test_dataloader, args, writer)
 
