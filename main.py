@@ -22,6 +22,7 @@ from sklearn.model_selection import KFold
 KIND = ['name', 'book', 'organization', 'company', 'game', 'address', 'scene', 'government', 'position', 'movie'] #len=10
 KIND2ID = dict()
 ID2KIND = dict()
+LOG_FN = './log.txt'
 for i in range(len(KIND)):
     KIND2ID[KIND[i]] = i
     ID2KIND[i] = KIND[i]
@@ -95,7 +96,6 @@ class NERDataset(Dataset):
     def __getitem__(self, idx):
         return self.data[idx]
 
-    
 def collate_fn(batch):
 
     lengths = torch.LongTensor([sample['length'] for sample in batch])
@@ -147,7 +147,7 @@ class MyNERModel(nn.Module):
         loss = self.loss(prediction.reshape(-1, self.total_kinds), labels.reshape(-1))
         return prediction, loss
 
-def train(train_dataset, args, writer):
+def train(train_dataset, args, writer, log):
     kf = KFold(n_splits=args.n_splits, shuffle=True, random_state=0)
     global_best_f1 = 0
     for fold_cnt, (train_idx, val_idx) in enumerate(kf.split(train_dataset)):
@@ -157,13 +157,24 @@ def train(train_dataset, args, writer):
         val_dataloader = DataLoader(val_data, batch_size=args.batch_size, shuffle=True, collate_fn=collate_fn)
 
         model = MyNERModel(args).cuda()
-        optimizer = Adam(model.parameters(), lr=args.learning_rate)
+        para_dict = dict(model.named_parameters())
+        paras_new = []
+        for k, v in para_dict.items():
+            if 'predict' in k:
+                paras_new += [{'params': [v], 'lr': 100*args.learning_rate}]
+            else:
+                paras_new += [{'params': [v], 'lr': args.learning_rate}]
+
+        optimizer = Adam(paras_new)
         global_step = 0
         fold_best_f1 = 0
 
         print('****************Fold %d*****************' % fold_cnt)
+        log.write('****************Fold %d*****************\n' % fold_cnt)
         for epoch in range(args.epochs):
-            print('Epoch %d' % epoch)
+            print('Training: Fold %d Epoch %d / %d' % (fold_cnt, epoch, args.epochs))
+            log.write('Training: Fold %d Epoch %d / %d \n' % (fold_cnt, epoch, args.epochs))
+            local_step = 0
             for batch in tqdm(train_dataloader):
                 prediction, loss = model(tokens=batch['tokens'].cuda(), labels=batch['labels'].cuda())
 
@@ -172,12 +183,20 @@ def train(train_dataset, args, writer):
                 optimizer.step()
 
                 writer.add_scalar('Fold_'+str(fold_cnt)+'_Train/Loss', loss.item(), global_step)
+
+                if local_step % 20 == 0:
+                    print('Batch %d, Loss: %.4f' % (local_step, loss.cpu().detach().numpy()))
+                    log.write('Batch %d, Loss: %.4f \n' % (local_step, loss.cpu().detach().numpy()))
+
+                local_step += 1
                 global_step += 1
             
             # eval
+            print('Validation: Fold %d Epoch %d / %d' % (fold_cnt, epoch, args.epochs))
+            log.write('Validation: Fold %d Epoch %d / %d \n' % (fold_cnt, epoch, args.epochs))
             model.eval()
-            f1 = validate(model, val_dataloader, args)
-            writer.add_scalar('Val/F1', f1, epoch)
+            f1 = validate(model, val_dataloader, args, log)
+            writer.add_scalar('Fold_'+str(fold_cnt)+'_Val/F1', f1, epoch)
             model.train()
 
             if f1 > fold_best_f1:
@@ -187,9 +206,10 @@ def train(train_dataset, args, writer):
                     global_best_f1 = f1
                     torch.save(model.state_dict(), os.path.join(args.output_dir, 'global_best_model.bin'))
                     print('-----------Global Best: Fold %d, F1-Score: %.4f-----------' % (fold_cnt, f1))
+                    log.write('-----------Global Best: Fold %d, F1-Score: %.4f----------- \n' % (fold_cnt, f1))
 
 
-def validate(model, val_dataloader, args):
+def validate(model, val_dataloader, args, log):
     pred = []
     gold = []
     with torch.no_grad():
@@ -234,20 +254,21 @@ def validate(model, val_dataloader, args):
 
                 pred.append(cur_result)
 
-    _, macro_f1 = get_f1_score(pred, gold)
+    _, macro_f1 = get_f1_score(pred, gold, log)
     return macro_f1
 
 
-def test(test_dataloader, args, writer):
+def test(test_dataloader, args, writer, log):
     model = MyNERModel(args).cuda()
     model_param = torch.load(os.path.join(args.output_dir, 'global_best_model.bin'))
     model.load_state_dict(model_param)
     model.eval()
-    f1 = validate(model, test_dataloader, args)
+    f1 = validate(model, test_dataloader, args, log)
     print('-----------Test set, F1-Score: %.4f-----------' % f1)
+    log.write('-----------Test set, F1-Score: %.4f----------- \n' % f1)
 
 
-def get_f1_score_label(pred, gold, label="organization"):
+def get_f1_score_label(pred, gold, label, log):
     """
     打分函数
     """
@@ -271,17 +292,19 @@ def get_f1_score_label(pred, gold, label="organization"):
     r = TP / (TP + FN + 1e-20)
     f = 2 * p * r / (p + r + 1e-20)
     print('label: {}\nTP: {}\tFP: {}\tFN: {}'.format(label, TP, FP, FN))
+    log.write('label: {}\nTP: {}\tFP: {}\tFN: {}\n'.format(label, TP, FP, FN))
     print('P: {:.2f}\tR: {:.2f}\tF1: {:.2f}'.format(p, r, f))
+    log.write('P: {:.2f}\tR: {:.2f}\tF1: {:.2f}\n'.format(p, r, f))
     print()
     return f
 
 
-def get_f1_score(pred, gold):
+def get_f1_score(pred, gold, log):
     f_score = {}
     labels = ['address', 'book', 'company', 'game', 'government', 'movie', 'name', 'organization', 'position', 'scene']
     sum = 0
     for label in labels:
-        f = get_f1_score_label(pred, gold, label=label)
+        f = get_f1_score_label(pred, gold, label=label, log=log)
         f_score[label] = f
         sum += f
     avg = sum / (len(labels) + 1e-20)
@@ -315,10 +338,12 @@ if __name__ == '__main__':
     #train_dataloader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, collate_fn=collate_fn)
     test_dataset = NERDataset(os.path.join(args.data_dir, 'test.json'), tokenizer, train=False)
     test_dataloader = DataLoader(test_dataset, batch_size=args.batch_size, shuffle=False, collate_fn=collate_fn)
+    log = open(LOG_FN, 'w')
     #model = MyNERModel(args).cuda()
     #if args.load_model is not None:
     #    model.load_state_dict(torch.load(args.load_model))
     writer = SummaryWriter(args.output_dir)
-    train(train_dataset, args, writer)
-    test(test_dataloader, args, writer)
+    train(train_dataset, args, writer, log)
+    test(test_dataloader, args, writer, log)
+    log.close()
 
