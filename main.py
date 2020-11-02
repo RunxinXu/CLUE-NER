@@ -11,6 +11,8 @@ from collections import defaultdict
 from tqdm import tqdm
 from tensorboardX import SummaryWriter
 from sklearn.model_selection import KFold
+from torchcrf import CRF
+
 
 # 简单检查了数据
 # 一共有十个类 而且不存在overlap or nested的现象
@@ -130,22 +132,25 @@ class MyNERModel(nn.Module):
         )
         self.logsoftmax = nn.LogSoftmax(dim=-1)
         self.loss = nn.NLLLoss(ignore_index=TARGET_PAD)
+        self.crf = CRF(num_tags=self.total_kinds, batch_first=True)
 
-    def forward(self, tokens, labels=None):
+    def forward(self, tokens, labels=None, is_train=False):
         # tokens: bsz * length
         mask = tokens != CONTEXT_PAD
         output = self.bert(input_ids=tokens, attention_mask=mask)
         output = output[0] # bsz * length * dim
         logits = self.predict(output)
-        prediction = self.logsoftmax(logits)
-        
-        if labels is None:
+        #prediction = self.logsoftmax(logits)
+        label_mask = labels != TARGET_PAD
+        masked_labels = labels.long() * label_mask.long()
+
+        if not is_train:
+            prediction = self.crf.decode(logits[:, 1:, :], mask=label_mask[:, 1:])  # Val/Test: Path Generation: Mask CLS/SEP
             return prediction
 
-        prediction = prediction[:, 1:-1, :] # skip [cls] and [sep]
-        labels = labels[:, 1:-1] 
-        loss = self.loss(prediction.reshape(-1, self.total_kinds), labels.reshape(-1))
-        return prediction, loss
+        #loss = self.loss(prediction.reshape(-1, self.total_kinds), labels.reshape(-1))
+        loss = self.crf(logits[:, 1:, :], masked_labels[:, 1:], mask=label_mask[:, 1:], reduction='mean') # Train: Calculating Loss: Mask CLS/SEP
+        return torch.neg(loss)
 
 def train(train_dataset, args, writer, log):
     kf = KFold(n_splits=args.n_splits, shuffle=True, random_state=0)
@@ -176,7 +181,7 @@ def train(train_dataset, args, writer, log):
             log.write('Training: Fold %d Epoch %d / %d \n' % (fold_cnt, epoch, args.epochs))
             local_step = 0
             for batch in tqdm(train_dataloader):
-                prediction, loss = model(tokens=batch['tokens'].cuda(), labels=batch['labels'].cuda())
+                loss = model(tokens=batch['tokens'].cuda(), labels=batch['labels'].cuda(), is_train=True)
 
                 optimizer.zero_grad()
                 loss.backward()
@@ -191,11 +196,13 @@ def train(train_dataset, args, writer, log):
                 local_step += 1
                 global_step += 1
             
-            # eval
+            # val
             print('Validation: Fold %d Epoch %d / %d' % (fold_cnt, epoch, args.epochs))
             log.write('Validation: Fold %d Epoch %d / %d \n' % (fold_cnt, epoch, args.epochs))
             model.eval()
             f1 = validate(model, val_dataloader, args, log)
+            print('Macro-F1-Score: %.4f' % f1)
+            log.write('Macro-F1-Score: %.4f \n' % f1)
             writer.add_scalar('Fold_'+str(fold_cnt)+'_Val/F1', f1, epoch)
             model.train()
 
@@ -205,8 +212,8 @@ def train(train_dataset, args, writer, log):
                 if f1 > global_best_f1:
                     global_best_f1 = f1
                     torch.save(model.state_dict(), os.path.join(args.output_dir, 'global_best_model.bin'))
-                    print('-----------Global Best: Fold %d, F1-Score: %.4f-----------' % (fold_cnt, f1))
-                    log.write('-----------Global Best: Fold %d, F1-Score: %.4f----------- \n' % (fold_cnt, f1))
+                    print('-----------Global Best: Fold %d, Macro-F1-Score: %.4f-----------' % (fold_cnt, f1))
+                    log.write('-----------Global Best: Fold %d, Macro-F1-Score: %.4f----------- \n' % (fold_cnt, f1))
 
 
 def validate(model, val_dataloader, args, log):
@@ -214,10 +221,10 @@ def validate(model, val_dataloader, args, log):
     gold = []
     with torch.no_grad():
         for batch in tqdm(val_dataloader):
-            prediction = model(tokens=batch['tokens'].cuda(), labels=None)
-            prediction = prediction[:, 1:-1, :]
-            prediction = torch.argmax(prediction, dim=-1).cpu().numpy() # bsz * length
-            bsz, length = prediction.shape
+            prediction = model(tokens=batch['tokens'].cuda(), labels=batch['labels'].cuda(), is_train=False)
+            # prediction = [cur_pred[1:-1] for cur_pred in prediction] 
+            # prediction = torch.argmax(prediction, dim=-1).cpu().numpy() # bsz * length
+            bsz = len(prediction)
             for i in range(bsz):
                 cur_result = {}
                 for entity_type in KIND:
@@ -226,6 +233,7 @@ def validate(model, val_dataloader, args, log):
                 gold.append(batch['raw_label'][i])
 
                 j = 0
+                #print(len(raw_token), len(prediction[i]))
                 while j < len(raw_token):
                     if prediction[i][j] >= 20 and prediction[i][j] < 30: # S
                         entity_name = raw_token[j]
