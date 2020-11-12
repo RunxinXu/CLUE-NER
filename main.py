@@ -124,11 +124,12 @@ class MyNERModel(nn.Module):
         super().__init__()
         self.bert = BertModel.from_pretrained(args.model_name) # BertModel
         self.total_kinds = 31
+        self.lstm = nn.LSTM(input_size=1024, hidden_size=128, bidirectional=True, batch_first=True)
         self.predict = nn.Sequential(
             nn.Dropout(p=0.3),
-            nn.Linear(1024, 128),
-            nn.ReLU(),
-            nn.Linear(128, self.total_kinds),
+            nn.Linear(2*128, self.total_kinds),
+            #nn.ReLU()
+            #nn.Linear(128, self.total_kinds),
         )
         self.logsoftmax = nn.LogSoftmax(dim=-1)
         self.loss = nn.NLLLoss(ignore_index=TARGET_PAD)
@@ -137,10 +138,11 @@ class MyNERModel(nn.Module):
     def forward(self, tokens, labels=None, is_train=False):
         # tokens: bsz * length
         mask = tokens != CONTEXT_PAD
-        output = self.bert(input_ids=tokens, attention_mask=mask)
-        output = output[0] # bsz * length * dim
+        output = self.bert(input_ids=tokens, attention_mask=mask)[0]
+        output = self.lstm(output)[0]  # bsz * length * 2hidden
+        # output = output[0] # bsz * length * dim
         logits = self.predict(output)
-        #prediction = self.logsoftmax(logits)
+        # prediction = self.logsoftmax(logits)
         label_mask = labels != TARGET_PAD
         masked_labels = labels.long() * label_mask.long()
 
