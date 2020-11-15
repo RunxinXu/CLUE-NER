@@ -37,14 +37,16 @@ class MyTokenizer(BertTokenizer):
 
     def tokenize(self, text):
         _tokens = []
+        raw_tokens = []
         for c in text:
+            raw_tokens.append(c)
             if self.do_lower_case:
                 c = c.lower()
             if c in self.vocab:
                 _tokens.append(c)
             else:
                 _tokens.append('[UNK]')
-        return _tokens
+        return _tokens, raw_tokens
 
 class NERDataset(Dataset):
     def __init__(self, data_path, tokenizer, train=True): 
@@ -57,8 +59,7 @@ class NERDataset(Dataset):
             for line in f:
                 d = json.loads(line)
                 text = d['text']
-                tokens = tokenizer.tokenize(text) # list
-                raw_token = tokens
+                tokens, raw_token = tokenizer.tokenize(text) # list
                 tokens = tokenizer.convert_tokens_to_ids(tokens) # list
                 labels = [30] * len(tokens) # 30 means O, i.e., not an entity
                 
