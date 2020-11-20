@@ -267,7 +267,7 @@ def validate(model, val_dataloader, args, log, is_test):
 
     if is_test:
         with open('./pred.json', 'w') as pred_f:
-            json.dump(pred, pred_f)
+            json.dump(pred, pred_f, ensure_ascii=False)
     _, macro_f1 = get_f1_score(pred, gold, log)
     return macro_f1
 
