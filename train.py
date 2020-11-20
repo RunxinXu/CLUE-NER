@@ -203,7 +203,7 @@ def train(train_dataset, args, writer, log):
             print('Validation: Fold %d Epoch %d / %d' % (fold_cnt, epoch, args.epochs))
             log.write('Validation: Fold %d Epoch %d / %d \n' % (fold_cnt, epoch, args.epochs))
             model.eval()
-            f1 = validate(model, val_dataloader, args, log)
+            f1 = validate(model, val_dataloader, args, log, is_test=False)
             print('Macro-F1-Score: %.4f' % f1)
             log.write('Macro-F1-Score: %.4f \n' % f1)
             writer.add_scalar('Fold_'+str(fold_cnt)+'_Val/F1', f1, epoch)
@@ -219,7 +219,7 @@ def train(train_dataset, args, writer, log):
                     log.write('-----------Global Best: Fold %d, Macro-F1-Score: %.4f----------- \n' % (fold_cnt, f1))
 
 
-def validate(model, val_dataloader, args, log):
+def validate(model, val_dataloader, args, log, is_test):
     pred = []
     gold = []
     with torch.no_grad():
@@ -265,10 +265,13 @@ def validate(model, val_dataloader, args, log):
 
                 pred.append(cur_result)
 
+    if is_test:
+        with open('./pred.json', 'w') as pred_f:
+            json.dump(pred, pred_f)
     _, macro_f1 = get_f1_score(pred, gold, log)
     return macro_f1
 
-
+""" 
 def test(test_dataloader, args, writer, log):
     model = MyNERModel(args).cuda()
     model_param = torch.load(os.path.join(args.output_dir, 'global_best_model.bin'))
@@ -277,7 +280,7 @@ def test(test_dataloader, args, writer, log):
     f1 = validate(model, test_dataloader, args, log)
     print('-----------Test set, F1-Score: %.4f-----------' % f1)
     log.write('-----------Test set, F1-Score: %.4f----------- \n' % f1)
-
+ """
 
 def get_f1_score_label(pred, gold, label, log):
     """
