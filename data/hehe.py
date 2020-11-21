@@ -26,6 +26,8 @@ occur_times_avg = [0 for _ in range(10)]
 span_length = [[0, 0] for _ in range(10)]
 span_length_avg = [0 for _ in range(10)]
 
+badcases = []
+
 for p, g in zip(pred, gold):
     text = g['text']
     fp_entity = []
@@ -45,30 +47,41 @@ for p, g in zip(pred, gold):
             if i not in pred_entity:
                 fn[idx] += 1
                 fn_entity.append(i)
-        # occur time
-        occur_times[idx][0] += len(gold_entity)
-        occur_times[idx][1] += 1
+                
+#         # occur time
+#         if len(gold_entity) > 0:
+#             occur_times[idx][0] += len(gold_entity)
+#             occur_times[idx][1] += 1
 
         # span length
         for span_list in g.get(kind, {}).values():
             for span in span_list:
                 span_length[idx][0] += span[1] - span[0] + 1
                 span_length[idx][1] += 1
-    print(text)
-    print(fp_entity)
-    print(fn_entity)
-    input()
-
+                
+    # bad cases
+    if len(fp_entity) > 2 or len(fn_entity) > 2:
+        badcases.append((text,g, p))
+            
 for i in range(10):
     precision[i] = tp[i] / (tp[i] + fp[i])
     recall[i] = tp[i] / (tp[i] + fn[i])
     f1[i] = 2 * precision[i] * recall[i] / (precision[i] + recall[i])
 
-    occur_times_avg[i] = occur_times[i][0] / occur_times[i][1]
+#     occur_times_avg[i] = occur_times[i][0] / occur_times[i][1]
     span_length_avg[i] = span_length[i][0] / span_length[i][1]
 
-print(precision)
-print(recall)
-print(f1)
-print(occur_times_avg)
-print(span_length_avg)
+for i in range(10):
+    print('Kind: {}'.format(KIND[i]))
+    print('Precision: {}'.format(round(precision[i]*100, 1)))
+    print('Recall: {}'.format(round(recall[i]*100, 1)))
+    print('f1: {}'.format(round(f1[i]*100, 1)))
+#     print('occur_times_avg: {}'.format(round(occur_times_avg[i], 1)))
+    print('span_length_avg: {}'.format(round(span_length_avg[i], 1)))
+    
+with open('badcases.json', 'w') as f:
+    for text, p, g in badcases:
+        f.write(json.dumps({"text": text}, ensure_ascii=False) + '\n')
+        f.write(json.dumps(p, ensure_ascii=False) + '\n')
+        f.write(json.dumps(g, ensure_ascii=False) + '\n')
+        f.write('\n'*3)
