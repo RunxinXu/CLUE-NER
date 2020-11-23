@@ -1,3 +1,4 @@
+
 from transformers import BertTokenizer, BertModel
 import torch
 import torch.nn as nn
@@ -125,7 +126,13 @@ class MyNERModel(nn.Module):
         super().__init__()
         self.bert = BertModel.from_pretrained(args.model_name) # BertModel
         self.total_kinds = 31
-        self.lstm = nn.LSTM(input_size=1024, hidden_size=128, bidirectional=True, batch_first=True)
+        self.conv1 = nn.Conv1d(in_channels=1024, out_channels=128, kernel_size=3, padding=1, stride=1, dilation=1)
+        self.conv3 = nn.Conv1d(in_channels=1024, out_channels=128, kernel_size=3, padding=3, stride=1, dilation=3)
+        self.conv5 = nn.Conv1d(in_channels=1024, out_channels=128, kernel_size=3, padding=5, stride=1, dilation=5)
+        torch.nn.init.xavier_uniform_(self.conv1.weight)
+        torch.nn.init.xavier_uniform_(self.conv3.weight)
+        torch.nn.init.xavier_uniform_(self.conv5.weight)
+        self.lstm = nn.LSTM(input_size=1024+128*3, hidden_size=128, bidirectional=True, batch_first=True)
         self.predict = nn.Sequential(
             nn.Dropout(p=0.3),
             nn.Linear(2*128, self.total_kinds),
@@ -139,8 +146,15 @@ class MyNERModel(nn.Module):
     def forward(self, tokens, labels=None, is_train=False):
         # tokens: bsz * length
         mask = tokens != CONTEXT_PAD
-        output = self.bert(input_ids=tokens, attention_mask=mask)[0]
-        output = self.lstm(output)[0]  # bsz * length * 2hidden
+        bert_output = self.bert(input_ids=tokens, attention_mask=mask)[0]
+        conv_input = bert_output.permute(0, 2, 1)    #bsz * hidden * length
+        conv_res1 = self.conv1(conv_input)[:,:,:]      #bsz * out_channel * length
+        conv_res3 = self.conv3(conv_input)[:,:,:] 
+        conv_res5 = self.conv5(conv_input)[:,:,:]
+        # print(conv_input.shape, conv_res1.shape, conv_res3.shape, conv_res5.shape)
+        conv_res = torch.cat((conv_res1, conv_res3, conv_res5), dim=1).permute(0, 2, 1)     #bsz * length * 3out_channel
+        rnn_input = torch.cat((conv_res, bert_output), dim=2)
+        output = self.lstm(rnn_input)[0]  # bsz * length * 2hidden
         # output = output[0] # bsz * length * dim
         logits = self.predict(output)
         # prediction = self.logsoftmax(logits)
@@ -358,6 +372,6 @@ if __name__ == '__main__':
     #    model.load_state_dict(torch.load(args.load_model))
     writer = SummaryWriter(args.output_dir)
     train(train_dataset, args, writer, log)
-    test(test_dataloader, args, writer, log)
+    #test(test_dataloader, args, writer, log)
     log.close()
 
