@@ -126,9 +126,9 @@ class MyNERModel(nn.Module):
         super().__init__()
         self.bert = BertModel.from_pretrained(args.model_name) # BertModel
         self.total_kinds = 31
-        self.conv1 = nn.Conv1d(in_channels=1024, out_channels=128, kernel_size=3, padding=1, stride=1, dilation=1)
-        self.conv3 = nn.Conv1d(in_channels=1024, out_channels=128, kernel_size=3, padding=3, stride=1, dilation=3)
-        self.conv5 = nn.Conv1d(in_channels=1024, out_channels=128, kernel_size=3, padding=5, stride=1, dilation=5)
+        self.conv1 = nn.Conv1d(in_channels=1024, out_channels=128, kernel_size=3, padding=2, stride=1, dilation=1)
+        self.conv3 = nn.Conv1d(in_channels=1024, out_channels=128, kernel_size=3, padding=6, stride=1, dilation=3)
+        self.conv5 = nn.Conv1d(in_channels=1024, out_channels=128, kernel_size=3, padding=10, stride=1, dilation=5)
         torch.nn.init.xavier_uniform_(self.conv1.weight)
         torch.nn.init.xavier_uniform_(self.conv3.weight)
         torch.nn.init.xavier_uniform_(self.conv5.weight)
@@ -148,9 +148,9 @@ class MyNERModel(nn.Module):
         mask = tokens != CONTEXT_PAD
         bert_output = self.bert(input_ids=tokens, attention_mask=mask)[0]
         conv_input = bert_output.permute(0, 2, 1)    #bsz * hidden * length
-        conv_res1 = self.conv1(conv_input)[:,:,:]      #bsz * out_channel * length
-        conv_res3 = self.conv3(conv_input)[:,:,:] 
-        conv_res5 = self.conv5(conv_input)[:,:,:]
+        conv_res1 = self.conv1(conv_input)[:,:,:-2]      #bsz * out_channel * length
+        conv_res3 = self.conv3(conv_input)[:,:,:-6] 
+        conv_res5 = self.conv5(conv_input)[:,:,:-10]
         # print(conv_input.shape, conv_res1.shape, conv_res3.shape, conv_res5.shape)
         conv_res = torch.cat((conv_res1, conv_res3, conv_res5), dim=1).permute(0, 2, 1)     #bsz * length * 3out_channel
         rnn_input = torch.cat((conv_res, bert_output), dim=2)
