@@ -182,7 +182,7 @@ def train(train_dataset, args, writer, log):
         para_dict = dict(model.named_parameters())
         paras_new = []
         for k, v in para_dict.items():
-            if 'predict' in k:
+            if 'crf' in k or 'predict' in k:
                 paras_new += [{'params': [v], 'lr': 100*args.learning_rate}]
             else:
                 paras_new += [{'params': [v], 'lr': args.learning_rate}]
